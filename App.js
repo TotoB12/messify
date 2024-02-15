@@ -1,68 +1,129 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, TextInput, Button, FlatList, Text, KeyboardAvoidingView, Platform, Animated } from 'react-native';
-import { RTCPeerConnection, RTCIceCandidate, RTCSessionDescription, mediaDevices } from 'react-native-webrtc';
+import {
+  StyleSheet,
+  View,
+  TextInput,
+  Button,
+  FlatList,
+  Text,
+  KeyboardAvoidingView,
+  Platform,
+  Animated,
+} from 'react-native';
+import {
+  RTCPeerConnection,
+  RTCIceCandidate,
+  RTCSessionDescription,
+} from 'react-native-webrtc';
 
-const configuration = {"iceServers": [{"url": "stun:stun.l.google.com:19302"}]}; // STUN server configuration
+const signalingServer = 'https://9656f628-5d94-4836-a821-bd3aebc53c29-00-p66jrhn8i2y3.kirk.replit.dev/';
 
 export default function App() {
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const fadeAnim = useRef(new Animated.Value(0)).current;
-
-  const pc = useRef(new RTCPeerConnection(configuration)).current;
+  const ws = useRef(null);
+  const peerConnection = useRef(new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  }));
+  const dataChannel = useRef(null);
 
   useEffect(() => {
-    // Setup peer connection and event listeners here
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        // Send candidate to peer via signaling server
-      }
+    ws.current = new WebSocket(signalingServer);
+
+    ws.current.onopen = () => {
+      console.log('WebSocket Connected');
+      setupDataChannel();
     };
 
-    pc.ondatachannel = (event) => {
-      const channel = event.channel;
-      channel.onmessage = (e) => {
-        // Handle incoming messages
-        const incomingMessage = JSON.parse(e.data);
-        setMessages((prevMessages) => [...prevMessages, incomingMessage]);
-      };
+    ws.current.onmessage = (e) => {
+      const message = JSON.parse(e.data);
+      handleSignalingData(message);
     };
 
-    // Setup data channel for sending messages
-    const dataChannel = pc.createDataChannel("chat");
-    dataChannel.onopen = (event) => {
-      console.log("Data channel is open");
+    return () => {
+      ws.current.close();
     };
-
-    // Example function to send message through data channel
-    const sendMessageThroughDataChannel = (msg) => {
-      const messageObj = { text: msg, key: Math.random().toString() };
-      dataChannel.send(JSON.stringify(messageObj));
-      setMessages((prevMessages) => [...prevMessages, messageObj]);
-    };
-
-    // Replace sendMessage function with sendMessageThroughDataChannel
-    // Remember to adjust the rest of your app logic to initiate and handle WebRTC connections
-
   }, []);
 
-  const sendMessage = () => {
-    if (message.trim().length > 0) {
-      // Update to send message over WebRTC data channel
-      setMessage('');
+  const setupDataChannel = () => {
+    try {
+      dataChannel.current = peerConnection.current.createDataChannel('chat');
+      dataChannel.current.onmessage = handleReceiveMessage;
+
+      peerConnection.current.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendMessageThroughSignalingChannel({
+            type: 'candidate',
+            candidate: event.candidate,
+          });
+        }
+      };
+
+      peerConnection.current.ondatachannel = (event) => {
+        peerConnection.current.dataChannel = event.channel;
+        peerConnection.current.dataChannel.onmessage = handleReceiveMessage;
+      };
+
+      createOffer();
+    } catch (error) {
+      console.error('Error setting up data channel:', error);
     }
   };
 
-  React.useEffect(() => {
-    Animated.timing(
-      fadeAnim,
-      {
-        toValue: 1,
-        duration: 2000,
-        useNativeDriver: true
-      }
-    ).start();
-  }, [fadeAnim])
+  const createOffer = async () => {
+    try {
+      const offer = await peerConnection.current.createOffer();
+      await peerConnection.current.setLocalDescription(offer);
+      sendMessageThroughSignalingChannel({
+        type: 'offer',
+        offer: offer,
+      });
+    } catch (error) {
+      console.error('Error creating offer:', error);
+    }
+  };
+
+  const handleReceiveMessage = (event) => {
+    const data = JSON.parse(event.data);
+    setMessages((prevMessages) => [...prevMessages, { key: Math.random().toString(), text: data.message }]);
+  };
+
+  const handleSignalingData = async (data) => {
+    switch (data.type) {
+      case 'offer':
+        await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.offer));
+        const answer = await peerConnection.current.createAnswer();
+        await peerConnection.current.setLocalDescription(answer);
+        sendMessageThroughSignalingChannel({
+          type: 'answer',
+          answer: answer,
+        });
+        break;
+      case 'answer':
+        await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.answer));
+        break;
+      case 'candidate':
+        peerConnection.current.addIceCandidate(new RTCIceCandidate(data.candidate));
+        break;
+      default:
+        break;
+    }
+  };
+
+  const sendMessageThroughSignalingChannel = (message) => {
+    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+      ws.current.send(JSON.stringify(message));
+    }
+  };
+
+  const sendMessage = () => {
+    if (message.trim().length > 0) {
+      const messageToSend = { message };
+      dataChannel.current.send(JSON.stringify(messageToSend));
+      setMessage('');
+    }
+  };
 
   return (
     <View style={styles.container}>
@@ -75,8 +136,8 @@ export default function App() {
           </View>
         )}
       />
-      <KeyboardAvoidingView 
-        behavior={Platform.OS === "ios" ? "padding" : "height"} 
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.inputContainer}
       >
         <TextInput
